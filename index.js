@@ -1,11 +1,10 @@
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const express = require('express')
 const cors = require('cors');
-const { query } = require('express');
-const res = require('express/lib/response');
 const app = express();
 const port = process.env.PORT || 5000;
 require('dotenv').config();
+const jwt = require('jsonwebtoken')
 
 
 // Middleware
@@ -20,6 +19,22 @@ const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster
 const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true, serverApi: ServerApiVersion.v1 });
 
 
+function verifyJWT(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).send({ message: 'UnAuthorized access' });
+    }
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, process.env.ACCESS_TOKEN, function (err, decoded) {
+        if (err) {
+            return res.status(403).send({ message: 'Forbidden access' })
+        }
+        req.decoded = decoded;
+        next();
+    });
+}
+
+
 
 
 async function run() {
@@ -27,6 +42,7 @@ async function run() {
         await client.connect()
         const serviceCollection = client.db('doctors_portal').collection('services');
         const bookingCollection = client.db('doctors_portal').collection('booking');
+        const userCollection = client.db('doctors_portal').collection('users');
 
         app.get('/service', async (req, res) => {
             const query = {};
@@ -34,6 +50,61 @@ async function run() {
             const service = await cursor.toArray();
             res.send(service);
         });
+
+        // user route handle
+        app.get('/user', verifyJWT, async (req, res) => {
+            const user = await userCollection.find().toArray();
+            res.send(user);
+        });
+
+
+        app.get('/admin/:email', async (req, res) => {
+            const email = req.params.email;
+            const user = await userCollection.findOne({ email: email });
+            const isAdmin = user.role === 'admin';
+            res.send({ admin: isAdmin })
+        })
+
+        //this is admin role
+        app.put('/user/admin/:email', verifyJWT, async (req, res) => {
+            const email = req.params.email;
+            const requester = req.decoded.email;
+            const requesterAccount = await userCollection.findOne({ email: requester });
+            if (requesterAccount.role === 'admin') {
+                const filter = { email: email };
+                const updateDoc = {
+                    $set: { role: 'admin' },
+                };
+                const result = await userCollection.updateOne(filter, updateDoc);
+                res.send(result);
+            }
+            else {
+                res.status(403).send({ message: 'forbidden' });
+            }
+        })
+
+
+
+
+        // if user is there this is ok. if user is not there we will take with put or when you register with gmail or google your info will set into mongodb
+        app.put('/user/:email', async (req, res) => {
+            const email = req.params.email;
+            const user = req.body;
+            const filter = { email: email };
+            const options = { upsert: true };
+            const updateDoc = {
+                $set: user,
+            }
+            const result = await userCollection.updateOne(filter, updateDoc, options);
+            const token = jwt.sign({ email: email }, process.env.ACCESS_TOKEN, { expiresIn: '1h' })
+            res.send({ result, token });
+        })
+
+
+
+
+
+
 
 
         // Warning: This is not the proper way to query multiple collection. 
@@ -72,17 +143,24 @@ async function run() {
          * app.get('/booking') // get all the booking in the collection. or get more then one or by filter
          * app.get('/booking/:id') //get a specific booking patient
          * app.post('/booking') // add a new booking
-         * app.patch('/booking/:id') // update any one booking or doctor
+         * app.patch('/booking/:id') // 
+         * app.put('booking/:id') // upsert ==> (if exists) or insert (if dose'nt exist)
          * app.delete('/booking/:id') // Delete any doctor or patient or booking
          */
 
         // show data on dashboard
-        app.get('/booking', async (req, res) => {
-            const patient = req.query.patient; ///////////////////////////////////////------------------------------------
-            const query = { patient: patient };
-            const cursor = bookingCollection.find(query);
-            const booking = await cursor.toArray();
-            res.send(booking);
+        app.get('/booking', verifyJWT, async (req, res) => {
+            const patient = req.query.patient;
+            const decodedEmail = req.decoded.email;
+            if (patient === decodedEmail) {
+                const query = { patient: patient };
+                const cursor = bookingCollection.find(query);
+                const booking = await cursor.toArray();
+                return res.send(booking);
+            }
+            else {
+                return res.status(403).send({ message: 'Forbidden access' });
+            }
         })
 
         // take patient information by clicking "BOOK APPOINTMENT"
